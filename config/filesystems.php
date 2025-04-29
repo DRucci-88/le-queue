@@ -59,6 +59,19 @@ return [
             'throw' => false,
             'report' => false,
         ],
+        'media' => [
+            'driver' => 'local',
+            'root'   => public_path('media'),
+            'url'    => env('APP_URL').'/media',
+            'visibility' => 'public',
+            'throw' => false,
+        ],
+        'temp' => [
+            'driver' => 'local',
+            'root' => storage_path('app/temp'),
+            'throw' => false,
+            'purge_every' => 7, // in days
+        ],
 
     ],
 
