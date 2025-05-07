@@ -20,6 +20,8 @@ class Export extends Model implements HasMedia
         'file_total_rows',
         'started_at',
         'completed_at',
+        'batch_id',
+        'batch_uuid'
     ];
 
     protected $casts = [

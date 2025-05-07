@@ -10,6 +10,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Spatie\SimpleExcel\SimpleExcelWriter;
+use DateTime;
 
 use Illuminate\Database\Eloquent\Model;
 use stdClass;
@@ -18,60 +19,102 @@ class LeExportToCsv implements ShouldQueue
 {
     use Batchable, Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    /**
+     * The number of times the job may be attempted.
+     *
+     * @var int
+     */
+    public $tries = 6;
+
+    /**
+     * The maximum number of unhandled exceptions to allow before failing.
+     *
+     * @var int
+     */
+    public $maxExceptions = 2;
+
+    /**
+     * The number of seconds the job can run before timing out.
+     *
+     * @var int
+     */
+    public $timeout = 90;
+
+    /**
+     * Indicate if the job should be marked as failed on timeout.
+     *
+     * @var bool
+     */
+    public $failOnTimeout = true;
+
+    /**
+     * Determine the time at which the job should timeout.
+     */
+    public function retryUntil(): DateTime
+    {
+        return now()->addHours(1);
+    }
+
     public function __construct(
         private LeExportProcessor $processor,
         private int $page,
         private int $perPage,
         private string $batchUuid,
-    ) {
-        $this->onQueue('le-export');
-    }
+    ) {}
 
     public function displayName(): string
     {
-        $displayName = sprintf("%s-%s-%s", self::class, $this->batchUuid, $this->page);
+        $displayName = sprintf("%s-%s-%s", self::class, $this->batch()->id, $this->page);
         Log::info(sprintf('[%s] [%s] displayName [%s]', self::class, $this->batchUuid, $displayName), []);
         return $displayName;
     }
 
     public function handle(): void
     {
-        $items = $this->processor->query()->forPage($this->page, $this->perPage)->get();
+        try {
 
-        if (empty($items)) return;
+            $items = $this->processor->query()->forPage($this->page, $this->perPage)->get();
 
-        // Leading index is used to make sure that the files are sorted
-        $leadingIndex = str_pad($this->page, 5, '0', STR_PAD_LEFT);
+            if (empty($items)) return;
 
-        $fileName = "export-{$this->batchUuid}-{$leadingIndex}.csv";
-        $csvPath = $this->storagePath($fileName);
-        $csvWriter = SimpleExcelWriter::create($csvPath, 'csv');
+            // Leading index is used to make sure that the files are sorted
+            $leadingIndex = str_pad($this->page, 5, '0', STR_PAD_LEFT);
 
-        Log::info(sprintf('[%s] [%s] file info', self::class, $this->batchUuid), [
-            'fileName' => $fileName,
-            'csvPath' => $csvPath,
-        ]);
+            $fileName = "export-{$this->batch()->id}-{$leadingIndex}.csv";
+            $csvPath = $this->storagePath($fileName);
+            $csvWriter = SimpleExcelWriter::create($csvPath, 'csv');
 
-        $items->each(function ($item) use ($csvWriter) {
-            if ($item instanceof Model) {
-                $item = $item->toArray();
-            }
+            Log::info(sprintf('[%s] [%s] file info', self::class, $this->batchUuid), [
+                'fileName' => $fileName,
+                'csvPath' => $csvPath,
+            ]);
 
-            if ($item instanceof stdClass) {
-                $item = json_decode(json_encode($item), true);
-            }
-
-            // Convert arrays inside $data to strings
-            foreach ($item as $key => $value) {
-                if (is_array($value)) {
-                    $item[$key] = json_encode($value);
+            $items->each(function ($item) use ($csvWriter) {
+                if ($item instanceof Model) {
+                    $item = $item->toArray();
                 }
-            }
 
-            $csvWriter->addRow($item); // TODO: formatRow
-        });
+                if ($item instanceof stdClass) {
+                    $item = json_decode(json_encode($item), true);
+                }
 
-        $csvWriter->close();
+                // Convert arrays inside $data to strings
+                foreach ($item as $key => $value) {
+                    if (is_array($value)) {
+                        $item[$key] = json_encode($value);
+                    }
+                }
+
+                $csvWriter->addRow($item); // TODO: formatRow
+            });
+
+            $csvWriter->close();
+        } catch (\Throwable $e) {
+            Log::error(sprintf('[%s] [%s] ', self::class, $this->batchUuid), [
+                'batchId' => $this->batch()->id,
+                'exception' => $e,
+            ]);
+        }
     }
 
     protected function storagePath($path = ''): string
