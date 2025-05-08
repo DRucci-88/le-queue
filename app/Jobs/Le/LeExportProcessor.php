@@ -78,7 +78,6 @@ abstract class LeExportProcessor implements ShouldQueue
                     'status' => ExportStatus::IN_PROGRESS->value,
                     'batch_id' => $batch->id,
                 ]);
-
             })
             ->then(function (Batch $batch) use ($export, $batchUuid, $exportName, $exportDisk, $exportDirectory, $totalJobs) {
                 // All jobs completed successfully...
@@ -90,19 +89,51 @@ abstract class LeExportProcessor implements ShouldQueue
                     'exportDirectory' => $exportDirectory
                 ]);
 
-                dispatch(new LeCollateExportsAndUploadToDisk($export, $batchUuid, $batch->id, $exportName, $exportDisk, $exportDirectory, $totalJobs));
+                dispatch(new LeCollateExportsAndUploadToDisk(
+                    $this->queueName,
+                    $export,
+                    $batchUuid,
+                    $batch->id,
+                    $exportName,
+                    $exportDisk,
+                    $exportDirectory,
+                    $totalJobs
+                ));
             })
-            ->catch(function (Batch $batch, Throwable $e) use ($batchUuid) {
+            ->catch(function (Batch $batch, Throwable $e) use ($export, $batchUuid) {
                 // First batch job failure detected...
                 Log::error(sprintf('[%s] [%s] Batch catch', self::class, $batchUuid), [
                     'batchId' => $batch->id,
                     'exception' => $e,
                 ]);
+
+                $export->update([
+                    'status' => ExportStatus::FAILED
+                ]);
+
             })
-            // ->allowFailures()
+            ->allowFailures()
             ->name($exportName)
             ->onQueue($this->queueName)
             ->dispatch();
+
+        /// Not recommended use case, because the Bus:batch cycle is depend on chain. So you cannot call ->progress, ->catch on Bus::batch inside the Bus::chain
+        // $chain = Bus::chain([
+        //     Bus::batch($jobs)
+        //         ->before(function (Batch $batch) {
+        //             // The batch has been created but no jobs have been added...
+        //         })
+        //         ->progress(function (Batch $batch) use ($export) {
+        //             // A single job has completed successfully...
+        //             $export->update([
+        //                 'status' => ExportStatus::IN_PROGRESS->value,
+        //                 'batch_id' => $batch->id,
+        //             ]);
+        //         }),
+        //     new LeCollateExportsAndUploadToDisk($export, $batchUuid, $batchUuid, $exportName, $exportDisk, $exportDirectory, $totalJobs)
+        // ])
+        //     ->dispatch();
+
     }
 
     private function initialize(): void

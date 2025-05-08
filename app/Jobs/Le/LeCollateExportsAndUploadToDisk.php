@@ -12,7 +12,10 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Spatie\SimpleExcel\SimpleExcelReader;
 use Spatie\SimpleExcel\SimpleExcelWriter;
+use Illuminate\Support\Facades\Bus;
 use DateTime;
+use Illuminate\Queue\ManuallyFailedException;
+use Throwable;
 
 class LeCollateExportsAndUploadToDisk implements ShouldQueue
 {
@@ -30,7 +33,7 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
      *
      * @var int
      */
-    public $maxExceptions = 2;
+    public $maxExceptions = 4;
 
     /**
      * The number of seconds the job can run before timing out.
@@ -47,6 +50,13 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
     public $failOnTimeout = true;
 
     /**
+     * The number of seconds to wait before retrying the job.
+     *
+     * @var int
+     */
+    public $backoff = 3;
+
+    /**
      * Determine the time at which the job should timeout.
      */
     public function retryUntil(): DateTime
@@ -55,6 +65,7 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
     }
 
     public function __construct(
+        protected string $queueName,
         protected Export $export,
         protected string $batchUuid,
         protected string $batchId,
@@ -62,7 +73,9 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
         protected string $exportDisk,
         protected string $exportDirectory,
         protected int $totalJobs,
-    ) {}
+    ) {
+        $this->onQueue($queueName);
+    }
 
     public function displayName(): string
     {
@@ -74,8 +87,15 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
     public function handle(): void
     {
         try {
+            
             // Read all file temporary
             $files = $this->getFilesSortedByIndex($this->batchId);
+
+            $this->validateTotalFileAndJob($files);
+
+            Log::info('HESOYAM', []);
+
+            // throw new \Exception('MENJADI GILAK');
 
             $collatedFileName = $this->exportName . '_' . now()->format('Y-m-d_H:i:s') . '.csv';
             $collatedFilePath = $this->storagePath($collatedFileName);
@@ -95,9 +115,7 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
             $collatedFileWriter->close();
 
             // Delete all files
-            foreach ($files as $file) {
-                unlink($this->storagePath($file));
-            }
+            $this->deleteAllFile($files);
 
             Log::info(sprintf('[%s] [%s] Deleting all file', self::class, $this->batchUuid), [
                 'files count' => count($files),
@@ -121,19 +139,48 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
                 'completed_at' => now(),
             ]);
 
-            Log::info(sprintf('[%s] [%s] Update export to completed', self::class, $this->batchUuid), [
+            Log::info(sprintf('[%s] [%s] Update export completed', self::class, $this->batchUuid), [
                 'export' => $this->export
             ]);
         } catch (\Throwable $e) {
-            Log::error(sprintf('[%s] [%s] ', self::class, $this->batchUuid), [
-                'batchId' => $this->batchId,
-                'exception' => $e,
-            ]);
+            // Log::error(sprintf('[%s] [%s] handle catch', self::class, $this->batchUuid), [
+            //     'batchId' => $this->batchId,
+            //     'exception' => $e,
+            // ]);
             throw $e;
         }
     }
 
-    protected function storagePath($path = ''): string
+    public function failed(?Throwable $e): void
+    {
+        Log::error(sprintf('[%s] [%s] Export Failed', self::class, $this->batchUuid), [
+            'attempts' => $this->attempts(),
+            'batchId' => $this->batchId,
+            'exportId' => $this->export->id,
+            'exception' => $e,
+        ]);
+
+        if (
+            $e instanceof ManuallyFailedException
+            // || $this->attempts() >= $this->tries
+            // || $e instanceof \Illuminate\Queue\MaxAttemptsExceededException
+            // || $e instanceof \Illuminate\Queue\TimeoutExceededException
+        ) {
+            $this->export->update([
+                'status' => ExportStatus::FAILED->value
+            ]);
+
+            $parentBatch = Bus::findBatch($this->batchId);
+            $parentBatch->cancel();
+
+            // Cleaning up
+            Log::error(sprintf('[%s] [%s] Perform cleaning csv after Export Failed', self::class, $this->batchUuid), []);
+            $files = $this->getFilesSortedByIndex($this->batchId);
+            $this->deleteAllFile($files);
+        }
+    }
+
+    public function storagePath($path = ''): string
     {
         // create temp directory if it doesn't exist
         if (!is_dir(storage_path('app/temp'))) {
@@ -143,7 +190,7 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
         return storage_path('app/temp/' . trim($path, '/'));
     }
 
-    function getFilesSortedByIndex($batchId): array
+    public function getFilesSortedByIndex($batchId): array
     {
         $allFiles = scandir($this->storagePath());
         $filteredFiles = array_filter($allFiles, function ($file) use ($batchId) {
@@ -161,17 +208,32 @@ class LeCollateExportsAndUploadToDisk implements ShouldQueue
             return $indexA <=> $indexB;
         });
 
+        return $filteredFiles;
+    }
+
+    public function validateTotalFileAndJob(array $files): void
+    {
+
         // $this->totalJobs = $this->totalJobs + 1; // TODO nanti di hapus, buat testing doang
 
         Log::info(sprintf('[%s] [%s] Collating files compare to jobs', self::class, $this->batchUuid), [
-            'filteredFiles' => count($filteredFiles),
+            'filteredFiles' => count($files),
             'totalJobs' => $this->totalJobs,
         ]);
-        if (count($filteredFiles) === $this->totalJobs) return $filteredFiles;
 
-        // TODO Exception
-        $this->fail('There are ExportToCsv job fail, difference file' . abs($this->totalJobs - count($filteredFiles)));
+        if (count($files) === $this->totalJobs) return;
 
-        throw new \Exception('There are ExportToCsv job fail, difference file [' . abs($this->totalJobs - count($filteredFiles)) . ']');
+        $exception = new ManuallyFailedException('There are ExportToCsv job fail, difference file [' . abs($this->totalJobs - count($files)) . ']');
+
+        $this->fail($exception); // This will stop the job ignoring $tries or $maxException
+        throw $exception;
+    }
+
+    public function deleteAllFile(array $files)
+    {
+        // Delete all files
+        foreach ($files as $file) {
+            unlink($this->storagePath($file));
+        }
     }
 }

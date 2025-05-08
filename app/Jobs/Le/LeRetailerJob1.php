@@ -9,15 +9,16 @@ use Illuminate\Support\Facades\Log;
 
 class LeRetailerJob1 extends LeExportProcessor
 {
-    
+
     public function query(): Builder
     {
         $this->queueName = 'le-export-1';
+
         $startDateOfVisit = Carbon::make('2025-01-01');
-        $endDateOfVisit = Carbon::make('2025-12-30');
+        $endDateOfVisit = Carbon::make('2025-02-01');
 
         $startDatePull = Carbon::make('2025-01-01');
-        $endDatePull = Carbon::make('2025-12-30');
+        $endDatePull = Carbon::make('2025-02-01');
 
         return DB::query()
             ->selectRaw('

@@ -14,10 +14,10 @@ class LeRetailerJob2 extends LeExportProcessor
         $this->queueName = 'le-export-2';
 
         $startDateOfVisit = Carbon::make('2025-01-01');
-        $endDateOfVisit = Carbon::make('2025-12-30');
+        $endDateOfVisit = Carbon::make('2025-02-01');
 
         $startDatePull = Carbon::make('2025-01-01');
-        $endDatePull = Carbon::make('2025-12-30');
+        $endDatePull = Carbon::make('2025-02-01');
 
         return DB::query()
             ->selectRaw('
